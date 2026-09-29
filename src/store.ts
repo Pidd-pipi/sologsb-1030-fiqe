@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { buildBatchSnapshot, computeBatchPlan, computeInvalidated, migrateWorkspace } from './batch';
 import { createInitialState } from './data';
+import type { BatchPlan } from './types';
 import type { ChecklistItem, ChecklistProject, ChecklistRevision, FlightStage, WorkspaceState } from './types';
 
 const STORAGE_KEY = 'sologsb-1030-workspace-v1';
@@ -12,7 +14,9 @@ function loadState(): WorkspaceState {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved) as WorkspaceState;
-      if (parsed.schemaVersion === 1 && parsed.projects?.length) return parsed;
+      if (parsed.projects?.length) {
+        return migrateWorkspace(parsed.schemaVersion === 2 ? parsed : { ...parsed, schemaVersion: 1 });
+      }
     }
   } catch {
     // Corrupted local draft falls back to the bundled operational checklist.
@@ -36,9 +40,29 @@ export function useChecklistStore() {
   const future = useRef<WorkspaceState[]>([]);
   const [, forceHistoryState] = useState(0);
 
+  // Batch computation state.
+  const generationRef = useRef(0);
+  const [batchPlan, setBatchPlan] = useState<BatchPlan | null>(null);
+  const [changedItemIds, setChangedItemIds] = useState<Set<string>>(new Set());
+
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [state]);
+
+  // Recompute the batch plan asynchronously with a generation guard so that
+  // rapid edits never let an earlier computation overwrite newer state.
+  useEffect(() => {
+    const generation = ++generationRef.current;
+    const project = state.projects.find((entry) => entry.id === state.selectedProjectId) ?? state.projects[0];
+    if (!project) return;
+    const changed = changedItemIds;
+    queueMicrotask(() => {
+      if (generationRef.current !== generation) return; // stale result, discard
+      const impacted = computeInvalidated(project, changed);
+      const plan = computeBatchPlan(project, impacted, generation);
+      if (generationRef.current === generation) setBatchPlan(plan);
+    });
+  }, [state, changedItemIds]);
 
   const commit = useCallback((mutator: (project: ChecklistProject) => void) => {
     setState((current) => {
@@ -65,6 +89,7 @@ export function useChecklistStore() {
 
   const selectProject = useCallback((id: string) => {
     setState((current) => ({ ...current, selectedProjectId: id }));
+    setChangedItemIds(new Set());
   }, []);
 
   const addProject = useCallback(() => {
@@ -144,6 +169,7 @@ export function useChecklistStore() {
       const item = project.items.find((entry) => entry.id === itemId);
       if (item) Object.assign(item, patch, { updatedAt: now() });
     });
+    setChangedItemIds((prev) => new Set(prev).add(itemId));
   }, [commit]);
 
   const deleteItem = useCallback((itemId: string) => {
@@ -192,6 +218,10 @@ export function useChecklistStore() {
   const freezeRevision = useCallback((note: string) => {
     directUpdate((project) => {
       const version = project.revision;
+      // Compute the batch snapshot synchronously so the frozen revision
+      // captures the exact batches at freeze time.
+      const impacted = computeInvalidated(project, changedItemIds);
+      const plan = computeBatchPlan(project, impacted, generationRef.current);
       const snapshot: ChecklistRevision = {
         id: uid('revision'),
         revision: version,
@@ -199,13 +229,16 @@ export function useChecklistStore() {
         createdAt: now(),
         note: note.trim() || '复核通过并冻结',
         stages: clone(project.stages),
-        items: clone(project.items)
+        items: clone(project.items),
+        batchSnapshot: buildBatchSnapshot(plan)
       };
       project.revisions.unshift(snapshot);
       project.status = 'frozen';
       project.reviewNote = note.trim();
     });
-  }, [directUpdate]);
+    // The frozen version is immutable; later drafts must not touch it.
+    setChangedItemIds(new Set());
+  }, [directUpdate, changedItemIds]);
 
   const createRevision = useCallback(() => {
     directUpdate((project) => {
@@ -224,6 +257,7 @@ export function useChecklistStore() {
       forceHistoryState((value) => value + 1);
       return previous;
     });
+    setChangedItemIds(new Set());
   }, []);
 
   const redo = useCallback(() => {
@@ -234,6 +268,7 @@ export function useChecklistStore() {
       forceHistoryState((value) => value + 1);
       return next;
     });
+    setChangedItemIds(new Set());
   }, []);
 
   const saveNow = useCallback(() => {
@@ -241,11 +276,27 @@ export function useChecklistStore() {
     setState((current) => updateSelected(current, () => undefined));
   }, [state]);
 
+  const clearImpact = useCallback(() => {
+    setChangedItemIds(new Set());
+  }, []);
+
+  const recomputeBatches = useCallback(() => {
+    const generation = ++generationRef.current;
+    const project = state.projects.find((entry) => entry.id === state.selectedProjectId) ?? state.projects[0];
+    if (!project) return;
+    const impacted = computeInvalidated(project, changedItemIds);
+    const plan = computeBatchPlan(project, impacted, generation);
+    setBatchPlan(plan);
+  }, [state, changedItemIds]);
+
   return {
     state,
     selectedProject,
     canUndo: past.current.length > 0,
     canRedo: future.current.length > 0,
+    batchPlan,
+    impactedItemIds: batchPlan ? new Set(batchPlan.invalidated) : new Set<string>(),
+    changedItemCount: changedItemIds.size,
     selectProject,
     addProject,
     updateProject,
@@ -263,6 +314,8 @@ export function useChecklistStore() {
     createRevision,
     undo,
     redo,
-    saveNow
+    saveNow,
+    clearImpact,
+    recomputeBatches
   };
 }

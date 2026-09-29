@@ -65,6 +65,7 @@ function App() {
   const issues = useMemo(() => validateProject(project), [project]);
   const errors = issues.filter((issue) => issue.level === 'error').length;
   const warnings = issues.filter((issue) => issue.level === 'warning').length;
+  const batchBlocking = (store.batchPlan?.blocking.length ?? 0) > 0;
   const selectedItem = project.items.find((item) => item.id === selectedItemId);
   const versionOptions = useMemo(() => buildVersionOptions(project), [project]);
   const diffEntries = useMemo(() => diffVersions(project, leftVersion, rightVersion), [project, leftVersion, rightVersion]);
@@ -235,8 +236,8 @@ function App() {
           <Flex gap="2" align="center" wrap="wrap">
             <Badge color={statusMeta[project.status].color} size="2">r{project.revision} · {statusMeta[project.status].label}</Badge>
             <Text size="1" color="gray">{errors ? `${errors} 个阻断` : '无阻断问题'} · {warnings} 个警告</Text>
-            {project.status === 'draft' && <Button color="amber" onClick={store.submitForReview} disabled={errors > 0}>提交复核</Button>}
-            {project.status === 'review' && <Button color="green" onClick={() => setFreezeOpen(true)} disabled={errors > 0}>复核通过并冻结</Button>}
+            {project.status === 'draft' && <Button color="amber" onClick={store.submitForReview} disabled={errors > 0 || batchBlocking}>提交复核</Button>}
+            {project.status === 'review' && <Button color="green" onClick={() => setFreezeOpen(true)} disabled={errors > 0 || batchBlocking}>复核通过并冻结</Button>}
             {project.status === 'frozen' && <Button onClick={store.createRevision}>创建修订 r{project.revision + 1}</Button>}
             <Button variant="soft" onClick={() => setShowPreview(true)}>只读预览</Button>
             <Button variant="soft" onClick={() => window.print()}>打印</Button>
@@ -248,6 +249,12 @@ function App() {
           <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
             <Tabs.List className="main-tabs">
               <Tabs.Trigger value="editor">编辑清单</Tabs.Trigger>
+              <Tabs.Trigger value="batches">
+                批次与依赖
+                {store.batchPlan && store.batchPlan.blocking.length > 0 && (
+                  <Badge color="red" size="1" ml="1">{store.batchPlan.blocking.length}</Badge>
+                )}
+              </Tabs.Trigger>
               <Tabs.Trigger value="versions">版本差异 <Badge size="1" variant="soft">{project.revisions.length}</Badge></Tabs.Trigger>
               <Tabs.Trigger value="print">打印预览</Tabs.Trigger>
             </Tabs.List>
@@ -333,6 +340,7 @@ function App() {
                                     <strong>{item.challenge || '未命名检查项'}</strong>
                                     {item.critical && <Badge color="red" size="1">关键</Badge>}
                                     {item.preconditionIds.length > 0 && <Badge color="blue" size="1">{item.preconditionIds.length} 前置</Badge>}
+                                    {store.impactedItemIds.has(item.id) && <Badge color="blue" variant="solid" size="1">受影响</Badge>}
                                     {itemIssues.length > 0 && <Badge color={itemIssues.some((issue) => issue.level === 'error') ? 'red' : 'amber'} size="1">{itemIssues.length} 问题</Badge>}
                                   </Flex>
                                   <span className={`response-preview ${!item.response ? 'missing' : ''}`}>{item.response || '缺少预期回应'}</span>
@@ -406,6 +414,108 @@ function App() {
                     </div>
                   </ScrollArea>
                 </aside>
+              </div>
+            </Tabs.Content>
+
+            <Tabs.Content value="batches">
+              <div className="content-page">
+                <Heading size="7">批次与依赖</Heading>
+                <Text color="gray" as="p">按阶段顺序和前置条件计算可执行批次；值变化时直接、间接受影响的项自动失效并重算。</Text>
+
+                <Flex gap="3" align="center" wrap="wrap" mb="4">
+                  <Badge color="green" size="2">{store.batchPlan?.batches.length ?? 0} 个可执行批次</Badge>
+                  <Badge color={store.batchPlan?.blocking.length ? 'red' : 'gray'} size="2">{store.batchPlan?.blocking.length ?? 0} 个阻断</Badge>
+                  <Badge color={store.batchPlan?.deferrals.length ? 'amber' : 'gray'} size="2">{store.batchPlan?.deferrals.length ?? 0} 项推迟</Badge>
+                  <Badge color={store.impactedItemIds.size ? 'blue' : 'gray'} size="2">{store.impactedItemIds.size} 项受影响</Badge>
+                  <Button variant="soft" onClick={store.recomputeBatches}>重新计算</Button>
+                  <Button variant="soft" onClick={store.clearImpact} disabled={store.impactedItemIds.size === 0}>清除影响标记</Button>
+                </Flex>
+
+                {store.batchPlan === null && (
+                  <Callout.Root><Callout.Text>正在计算批次…</Callout.Text></Callout.Root>
+                )}
+
+                {store.batchPlan && store.batchPlan.blocking.length > 0 && (
+                  <Callout.Root color="red" mb="4">
+                    <Callout.Text>存在 {store.batchPlan.blocking.length} 个阻断问题，无法计算可执行批次。请先解决循环依赖、自引用、缺失引用或倒序依赖。</Callout.Text>
+                  </Callout.Root>
+                )}
+
+                {store.batchPlan && store.batchPlan.blocking.length === 0 && store.batchPlan.batches.length === 0 && (
+                  <Callout.Root><Callout.Text>当前检查单没有可执行的检查项。</Callout.Text></Callout.Root>
+                )}
+
+                <div className="batch-list">
+                  {store.batchPlan?.batches.map((batch) => (
+                    <Card key={batch.index} className="batch-card">
+                      <Flex justify="between" align="center" mb="3">
+                        <Flex gap="2" align="center">
+                          <Badge color="green">第 {batch.index + 1} 批</Badge>
+                          <Text size="2" weight="bold">{batch.items.length} 项</Text>
+                        </Flex>
+                        <Text size="1" color="gray">同阶段无依赖的项可同批执行</Text>
+                      </Flex>
+                      <div className="batch-items">
+                        {batch.items.map((bi) => {
+                          const item = project.items.find((it) => it.id === bi.itemId);
+                          const stage = project.stages.find((s) => s.id === bi.stageId);
+                          const impacted = store.impactedItemIds.has(bi.itemId);
+                          return (
+                            <div key={bi.itemId} className={`batch-item ${impacted ? 'impacted' : ''}`}>
+                              <div className="batch-item-main">
+                                <Text size="2" weight="bold">{item?.challenge || '未命名检查项'}</Text>
+                                <Text size="1" color="gray">{stage?.name ?? '未分配阶段'} · 阶段 {bi.stageOrder + 1}{bi.deferred ? ` · 原第 ${bi.naturalBatch + 1} 批` : ''}</Text>
+                              </div>
+                              <Flex gap="1" align="center">
+                                {bi.deferred && <Tooltip content={bi.deferralDetail ?? '依赖前置检查项，推迟执行'}><Badge color="amber" size="1">推迟</Badge></Tooltip>}
+                                {impacted && <Badge color="blue" size="1">受影响</Badge>}
+                              </Flex>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+
+                {store.batchPlan && store.batchPlan.deferrals.length > 0 && (
+                  <div className="deferral-section">
+                    <Heading size="4" mb="3">推迟说明</Heading>
+                    <div className="deferral-list">
+                      {store.batchPlan.deferrals.map((d) => {
+                        const item = project.items.find((it) => it.id === d.itemId);
+                        return (
+                          <div key={d.itemId} className="deferral-item">
+                            <Badge color="amber" size="1">{d.kind === 'depends-on-same-stage' ? '同阶段依赖' : '跨阶段依赖'}</Badge>
+                            <div>
+                              <Text size="2" weight="bold">{item?.challenge || '未命名检查项'}</Text>
+                              <Text size="1" color="gray">{d.detail}</Text>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {store.batchPlan && store.batchPlan.blocking.length > 0 && (
+                  <div className="deferral-section">
+                    <Heading size="4" mb="3">阻断问题</Heading>
+                    <div className="deferral-list">
+                      {store.batchPlan.blocking.map((b) => {
+                        return (
+                          <div key={b.id} className="deferral-item blocking">
+                            <Badge color="red" size="1">{b.type === 'cycle' ? '循环' : b.type === 'self-reference' ? '自引用' : b.type === 'missing-reference' ? '缺失' : '倒序'}</Badge>
+                            <div>
+                              <Text size="2" weight="bold">{b.title}</Text>
+                              <Text size="1" color="gray">{b.detail}</Text>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             </Tabs.Content>
 
