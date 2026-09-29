@@ -1,3 +1,4 @@
+import { computeBatchPlan } from './engine';
 import type { ChecklistItem, ChecklistProject, FlightStage, WorkspaceState } from './types';
 
 const stages: FlightStage[] = [
@@ -49,6 +50,10 @@ const items: ChecklistItem[] = [
   item('item-landing-clear', 'stage-landing', 1, '着陆跑道', 'CLEAR', true, ['item-runway'], '跑道不安全时执行复飞。')
 ];
 
+const revision2Items = structuredClone(items.filter((entry) => entry.id !== 'item-pressurization').map((entry) => entry.id === 'item-flaps' ? { ...entry, response: 'CHECKED' } : entry));
+const revision1Stages = structuredClone(stages.slice(0, 5));
+const revision1Items = structuredClone(items.filter((entry) => entry.id !== 'item-pressurization' && entry.id !== 'item-landing-clear'));
+
 const project: ChecklistProject = {
   id: 'project-c172',
   name: 'C172 标准操作检查单',
@@ -67,7 +72,8 @@ const project: ChecklistProject = {
       createdAt: '2026-09-20T04:20:00.000Z',
       note: '训练飞行前发布版本',
       stages: structuredClone(stages),
-      items: structuredClone(items.filter((entry) => entry.id !== 'item-pressurization').map((entry) => entry.id === 'item-flaps' ? { ...entry, response: 'CHECKED' } : entry))
+      items: revision2Items,
+      batchPlan: computeBatchPlan({ stages: structuredClone(stages), items: revision2Items }, '2026-09-20T04:20:00.000Z')
     },
     {
       id: 'revision-1',
@@ -75,14 +81,15 @@ const project: ChecklistProject = {
       status: 'frozen',
       createdAt: '2026-09-12T07:30:00.000Z',
       note: '初始基线',
-      stages: structuredClone(stages.slice(0, 5)),
-      items: structuredClone(items.filter((entry) => entry.id !== 'item-pressurization' && entry.id !== 'item-landing-clear'))
+      stages: revision1Stages,
+      items: revision1Items,
+      batchPlan: computeBatchPlan({ stages: structuredClone(revision1Stages), items: revision1Items }, '2026-09-12T07:30:00.000Z')
     }
   ]
 };
 
 export const createInitialState = (): WorkspaceState => ({
-  schemaVersion: 1,
+  schemaVersion: 2,
   selectedProjectId: project.id,
   projects: [project]
 });

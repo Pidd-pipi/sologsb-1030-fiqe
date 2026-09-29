@@ -22,8 +22,9 @@ import {
   Tooltip
 } from '@radix-ui/themes';
 import { buildVersionOptions, diffVersions } from './diff';
+import { useExecutionPlan, type ComputeState, type ItemExecution } from './execution';
 import { useChecklistStore } from './store';
-import type { ChecklistItem, ChecklistProject, IssueLevel, ValidationIssue, WorkflowStatus } from './types';
+import type { BatchPlan, ChecklistItem, ChecklistProject, DependencyBlocker, IssueLevel, ValidationIssue, WorkflowStatus } from './types';
 import { validateProject } from './validation';
 
 const statusMeta: Record<WorkflowStatus, { label: string; color: 'gray' | 'amber' | 'green'; description: string }> = {
@@ -63,6 +64,7 @@ function App() {
   const searchRef = useRef<HTMLInputElement>(null);
 
   const issues = useMemo(() => validateProject(project), [project]);
+  const execution = useExecutionPlan(project);
   const errors = issues.filter((issue) => issue.level === 'error').length;
   const warnings = issues.filter((issue) => issue.level === 'warning').length;
   const selectedItem = project.items.find((item) => item.id === selectedItemId);
@@ -248,6 +250,12 @@ function App() {
           <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
             <Tabs.List className="main-tabs">
               <Tabs.Trigger value="editor">编辑清单</Tabs.Trigger>
+              <Tabs.Trigger value="batches">
+                执行批次
+                <Badge size="1" variant="soft" color={execution.plan.blockersCount ? 'red' : execution.running ? 'amber' : 'green'}>
+                  {execution.plan.blockersCount ? `${execution.plan.blockersCount} 阻断` : `${execution.plan.batchesCount} 批`}
+                </Badge>
+              </Tabs.Trigger>
               <Tabs.Trigger value="versions">版本差异 <Badge size="1" variant="soft">{project.revisions.length}</Badge></Tabs.Trigger>
               <Tabs.Trigger value="print">打印预览</Tabs.Trigger>
             </Tabs.List>
@@ -317,6 +325,7 @@ function App() {
                         <div className="item-table">
                           {items.map((item) => {
                             const itemIssues = issues.filter((issue) => issue.itemId === item.id);
+                            const execItem = execution.items[item.id];
                             return (
                               <article
                                 key={item.id}
@@ -333,6 +342,7 @@ function App() {
                                     <strong>{item.challenge || '未命名检查项'}</strong>
                                     {item.critical && <Badge color="red" size="1">关键</Badge>}
                                     {item.preconditionIds.length > 0 && <Badge color="blue" size="1">{item.preconditionIds.length} 前置</Badge>}
+                                    {execItem && <BatchStateBadge exec={execItem} />}
                                     {itemIssues.length > 0 && <Badge color={itemIssues.some((issue) => issue.level === 'error') ? 'red' : 'amber'} size="1">{itemIssues.length} 问题</Badge>}
                                   </Flex>
                                   <span className={`response-preview ${!item.response ? 'missing' : ''}`}>{item.response || '缺少预期回应'}</span>
@@ -361,6 +371,16 @@ function App() {
                         <Flex justify="between" align="center" mb="3"><Heading size="4">检查项详情</Heading>{selectedItem && <Badge variant="soft">#{selectedItem.order + 1}</Badge>}</Flex>
                         {selectedItem ? (
                           <div className="inspector-form">
+                            {execution.items[selectedItem.id] && (
+                              <Callout.Root size="1" color={execution.items[selectedItem.id].state === 'blocked' ? 'red' : execution.items[selectedItem.id].state === 'fresh' ? 'green' : 'amber'}>
+                                <Callout.Text>
+                                  {execution.items[selectedItem.id].state === 'blocked'
+                                    ? '已被依赖阻断，不进入任何批次'
+                                    : `第 ${execution.items[selectedItem.id].batch} 批 · 阶段内第 ${(execution.items[selectedItem.id].layer ?? 0) + 1} 层 · ${computeStateLabel(execution.items[selectedItem.id].state)}`}
+                                  {execution.items[selectedItem.id].staleReason ? `：${execution.items[selectedItem.id].staleReason}` : ''}
+                                </Callout.Text>
+                              </Callout.Root>
+                            )}
                             <label><span>挑战语</span><TextField.Root value={selectedItem.challenge} disabled={project.status !== 'draft'} onChange={(event) => store.updateItem(selectedItem.id, { challenge: event.target.value })} /></label>
                             <label><span>预期回应</span><TextField.Root value={selectedItem.response} disabled={project.status !== 'draft'} onChange={(event) => store.updateItem(selectedItem.id, { response: event.target.value })} /></label>
                             <Flex justify="between" align="center"><Text size="2" weight="bold">关键标记</Text><Switch checked={selectedItem.critical} disabled={project.status !== 'draft'} onCheckedChange={(checked) => store.updateItem(selectedItem.id, { critical: checked })} /></Flex>
@@ -409,6 +429,17 @@ function App() {
               </div>
             </Tabs.Content>
 
+            <Tabs.Content value="batches">
+              <BatchTab
+                project={project}
+                execution={execution}
+                frozenPlan={project.status === 'frozen'
+                  ? project.revisions.find((revision) => revision.revision === project.revision)?.batchPlan
+                  : undefined}
+                onLocate={(itemId, stageId) => { setSelectedItemId(itemId); setQuickStageId(stageId); setActiveTab('editor'); }}
+              />
+            </Tabs.Content>
+
             <Tabs.Content value="versions">
               <div className="content-page">
                 <Heading size="7">版本差异</Heading>
@@ -428,6 +459,24 @@ function App() {
                       </Grid>
                     </Card>
                   )) : <div className="empty-page"><strong>两个版本没有差异</strong><span>选择不同版本后可查看新增、删除和修改的检查项。</span></div>}
+                </div>
+                <div className="frozen-batch-archive">
+                  <Heading size="4" mb="2">冻结批次归档</Heading>
+                  <Text size="1" color="gray" as="p">每个冻结版本保存当时计算的批次；草稿后续修改不回写旧版本。</Text>
+                  <div className="frozen-batch-list">
+                    {project.revisions.map((revision) => (
+                      <Card key={revision.id} className="frozen-batch-card">
+                        <Flex justify="between" align="center">
+                          <strong>r{revision.revision} · {revision.note}</strong>
+                          <Badge color={revision.batchPlan?.blockersCount ? 'red' : 'green'} variant="soft">
+                            {revision.batchPlan ? `${revision.batchPlan.batchesCount} 批 / ${revision.batchPlan.blockersCount} 阻断` : '无批次快照'}
+                          </Badge>
+                        </Flex>
+                        <small>{new Date(revision.createdAt).toLocaleString('zh-CN')}{revision.batchPlan ? ` · 核对于 ${new Date(revision.batchPlan.computedAt).toLocaleString('zh-CN')}` : ''}</small>
+                      </Card>
+                    ))}
+                    {!project.revisions.length && <Text size="2" color="gray">尚无冻结版本。</Text>}
+                  </div>
                 </div>
               </div>
             </Tabs.Content>
@@ -479,6 +528,165 @@ function App() {
         </Dialog.Content>
       </Dialog.Root>
     </Theme>
+  );
+}
+
+const computeStateMeta: Record<ComputeState, { label: string; color: 'gray' | 'amber' | 'green' | 'red' | 'blue' }> = {
+  queued: { label: '待计算', color: 'gray' },
+  computing: { label: '计算中', color: 'blue' },
+  fresh: { label: '最新', color: 'green' },
+  stale: { label: '已失效', color: 'amber' },
+  blocked: { label: '阻断', color: 'red' }
+};
+
+const computeStateLabel = (state: ComputeState) => computeStateMeta[state].label;
+
+function BatchStateBadge({ exec }: { exec: ItemExecution }) {
+  const meta = computeStateMeta[exec.state];
+  return (
+    <Tooltip content={exec.staleReason || meta.label}>
+      <Badge color={meta.color} size="1">{exec.batch ? `批${exec.batch}` : '无批次'} · {meta.label}</Badge>
+    </Tooltip>
+  );
+}
+
+const blockerTypeLabel: Record<DependencyBlocker['type'], string> = {
+  self: '自引用',
+  missing: '缺失引用',
+  cycle: '循环依赖',
+  reverse: '倒序依赖'
+};
+
+interface BatchTabProps {
+  project: ChecklistProject;
+  execution: ReturnType<typeof useExecutionPlan>;
+  /** 冻结版本固化的批次；提供时以快照为准，草稿状态不会影响它 */
+  frozenPlan?: BatchPlan;
+  onLocate: (itemId: string, stageId: string) => void;
+}
+
+function BatchTab({ project, execution, frozenPlan, onLocate }: BatchTabProps) {
+  const livePlan = execution.plan;
+  const plan = frozenPlan ?? livePlan;
+  const itemById = new Map(project.items.map((item) => [item.id, item]));
+  const stageById = new Map(project.stages.map((stage) => [stage.id, stage]));
+  const stagesSorted = project.stages.slice().sort((a, b) => a.order - b.order);
+  const blockersByItem = new Map<string, DependencyBlocker[]>();
+  plan.blocked.forEach((blocker) => {
+    blockersByItem.set(blocker.itemId, [...(blockersByItem.get(blocker.itemId) ?? []), blocker]);
+  });
+
+  return (
+    <div className="content-page batch-page">
+      <Flex justify="between" align="center" wrap="wrap" gap="3">
+        <div>
+          <Heading size="7">可执行批次</Heading>
+          <Text color="gray" as="p">
+            {frozenPlan
+              ? `冻结快照 · ${new Date(plan.computedAt).toLocaleString('zh-CN')} · 之后草稿修改不影响本版本`
+              : `按阶段顺序与前置条件实时计算 · 代号 g${execution.generation}${execution.running ? ' · 正在按批核对…' : ' · 已空闲'}`}
+          </Text>
+        </div>
+        <Flex gap="2" align="center" wrap="wrap">
+          <Badge size="2" color={plan.blockersCount ? 'red' : 'green'}>{plan.batchesCount} 个批次</Badge>
+          <Badge size="2" color={plan.blockersCount ? 'red' : 'gray'}>{plan.blockersCount} 项阻断</Badge>
+        </Flex>
+      </Flex>
+
+      {(execution.changed.length > 0 || execution.affected.length > 0) && !frozenPlan && (
+        <Callout.Root color="amber" mt="4">
+          <Callout.Text>
+            最近一次变更直接命中 {execution.changed.length} 项
+            （{execution.changed.map((id) => itemById.get(id)?.challenge || id).slice(0, 5).join('、')}{execution.changed.length > 5 ? ' …' : ''}），
+            连带直接、间接失效 {execution.affected.length} 项，已全部进入重算队列，旧结果在被替换前标记为“已失效”。
+          </Callout.Text>
+        </Callout.Root>
+      )}
+
+      {plan.blocked.length > 0 && (
+        <Card mt="4" className="blocker-panel">
+          <Heading size="4" mb="3" color="red">阻断项（{plan.blocked.length}）— 不进入批次，必须先解除</Heading>
+          <div className="blocker-list">
+            {plan.blocked.map((blocker, index) => {
+              const item = itemById.get(blocker.itemId);
+              return (
+                <button key={`${blocker.itemId}-${blocker.type}-${index}`} className="issue-card error" onClick={() => item && onLocate(blocker.itemId, item.stageId)}>
+                  <Badge color="red" size="1">{blockerTypeLabel[blocker.type]}{blocker.kind === 'cascade' ? ' · 波及' : ''}</Badge>
+                  <span>
+                    <strong>{item?.challenge || blocker.itemId}</strong>
+                    <small>{blocker.detail}</small>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </Card>
+      )}
+
+      {plan.deferrals.length > 0 && (
+        <Callout.Root color="blue" mt="3">
+          <Callout.Text>
+            {plan.deferrals.length} 条依赖与阶段顺序存在张力，已按依赖关系推迟：
+            {plan.deferrals.map((deferral) => ` ${itemById.get(deferral.itemId)?.challenge ?? deferral.itemId}（${deferral.reason}）`).join('；')}
+          </Callout.Text>
+        </Callout.Root>
+      )}
+
+      <div className="batch-groups">
+        {plan.batches.map((group) => {
+          const stage = stageById.get(group.stageId);
+          const isNewStage = plan.batches.findIndex((candidate) => candidate.stageId === group.stageId) === plan.batches.indexOf(group);
+          return (
+            <div key={`${group.stageId}-${group.batch}`} className="batch-group-wrap">
+              {isNewStage && (
+                <div className="batch-stage-band">
+                  <Heading size="3">{stage?.name ?? '未知阶段'}</Heading>
+                  <Text size="1" color="gray">{stage?.description}</Text>
+                </div>
+              )}
+              <Card className="batch-group">
+                <div className="batch-group-head">
+                  <span className="batch-number">批次 {group.batch}</span>
+                  <Text size="1" color="gray">同批 {group.itemIds.length} 项互不依赖，可同时执行；须等更早批次全部核对完成</Text>
+                </div>
+                <div className="batch-items">
+                  {group.itemIds.map((id) => {
+                    const item = itemById.get(id);
+                    const exec = execution.items[id];
+                    const state: ComputeState = frozenPlan ? 'fresh' : (exec?.state ?? 'queued');
+                    if (!item) return null;
+                    const preconditions = item.preconditionIds
+                      .map((preId) => itemById.get(preId)?.challenge)
+                      .filter(Boolean)
+                      .join('、');
+                    return (
+                      <button key={id} className={`batch-item state-${state}`} onClick={() => onLocate(id, item.stageId)}>
+                        <Flex justify="between" align="center">
+                          <strong>{item.critical && <span className="critical-mark">◆ </span>}{item.challenge || '未命名检查项'}</strong>
+                          {!frozenPlan && exec && <BatchStateBadge exec={exec} />}
+                        </Flex>
+                        <small className="batch-response">{item.response || '缺少预期回应'}</small>
+                        {preconditions && <small className="batch-deps">前置：{preconditions}</small>}
+                        {!frozenPlan && exec?.result && <small className="batch-result">{exec.result}</small>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Card>
+            </div>
+          );
+        })}
+        {!plan.batches.length && (
+          <div className="empty-page"><strong>没有可执行批次</strong><span>所有检查项都被阻断，或当前检查单为空。</span></div>
+        )}
+      </div>
+
+      {frozenPlan && (
+        <Callout.Root color="green" mt="4">
+          <Callout.Text>此为冻结时固化的批次（{stagesSorted.length} 阶段 / {project.items.length} 项）。回到草稿继续编辑不会改动该快照，需创建新修订后才会重新计算。</Callout.Text>
+        </Callout.Root>
+      )}
+    </div>
   );
 }
 

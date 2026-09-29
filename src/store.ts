@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createInitialState } from './data';
-import type { ChecklistItem, ChecklistProject, ChecklistRevision, FlightStage, WorkspaceState } from './types';
+import { computeBatchPlan } from './engine';
+import { migrateV1ToV2 } from './migration';
+import type { ChecklistItem, ChecklistProject, ChecklistRevision, FlightStage, WorkspaceState, WorkspaceStateV1 } from './types';
 
 const STORAGE_KEY = 'sologsb-1030-workspace-v1';
 const clone = <T>(value: T): T => structuredClone(value);
@@ -11,8 +13,14 @@ function loadState(): WorkspaceState {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
-      const parsed = JSON.parse(saved) as WorkspaceState;
-      if (parsed.schemaVersion === 1 && parsed.projects?.length) return parsed;
+      const parsed = JSON.parse(saved) as WorkspaceState | WorkspaceStateV1;
+      if (parsed.schemaVersion === 2 && parsed.projects?.length) return parsed;
+      // 旧数据升级：先补齐依赖关系，再做全量核对并回填冻结批次
+      if (parsed.schemaVersion === 1 && parsed.projects?.length) {
+        const migrated = migrateV1ToV2(parsed as WorkspaceStateV1);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+        return migrated;
+      }
     }
   } catch {
     // Corrupted local draft falls back to the bundled operational checklist.
@@ -192,6 +200,8 @@ export function useChecklistStore() {
   const freezeRevision = useCallback((note: string) => {
     directUpdate((project) => {
       const version = project.revision;
+      // 冻结时保存当时批次；快照独立于草稿，之后草稿再改也不回写旧版本
+      const batchPlan = computeBatchPlan({ stages: project.stages, items: project.items });
       const snapshot: ChecklistRevision = {
         id: uid('revision'),
         revision: version,
@@ -199,7 +209,8 @@ export function useChecklistStore() {
         createdAt: now(),
         note: note.trim() || '复核通过并冻结',
         stages: clone(project.stages),
-        items: clone(project.items)
+        items: clone(project.items),
+        batchPlan
       };
       project.revisions.unshift(snapshot);
       project.status = 'frozen';

@@ -1,13 +1,37 @@
-import type { ChecklistItem, ChecklistProject, ValidationIssue } from './types';
+import { computeBatchPlan } from './engine';
+import type { ChecklistItem, ChecklistProject, DependencyBlocker, ValidationIssue } from './types';
 
 const normalize = (value: string) => value.trim().replace(/\s+/g, ' ').toLocaleLowerCase('en');
 
+const blockerTitle: Record<DependencyBlocker['type'], string> = {
+  self: '前置条件形成自引用',
+  missing: '前置条件引用缺失',
+  cycle: '前置条件形成循环依赖',
+  reverse: '前置条件顺序不可达'
+};
+
+const blockerIssueType = (blocker: DependencyBlocker): ValidationIssue['type'] =>
+  blocker.type === 'cycle' ? 'dependency-cycle' : 'unreachable-precondition';
+
 export function validateProject(project: ChecklistProject): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  const stageById = new Map(project.stages.map((stage) => [stage.id, stage]));
-  const itemById = new Map(project.items.map((item) => [item.id, item]));
 
   const add = (issue: ValidationIssue) => issues.push(issue);
+
+  // 依赖图阻断：自引用、缺失引用、循环、倒序，以及它们沿链波及的下游项
+  const plan = computeBatchPlan({ stages: project.stages, items: project.items });
+  plan.blocked.forEach((blocker) => {
+    const item = project.items.find((candidate) => candidate.id === blocker.itemId);
+    add({
+      id: `${blocker.itemId}-${blocker.type}-${blocker.kind}-${blocker.refId ?? 'root'}`,
+      type: blockerIssueType(blocker),
+      level: 'error',
+      stageId: item?.stageId,
+      itemId: blocker.itemId,
+      title: blocker.kind === 'cascade' ? `受阻断项波及：${blockerTitle[blocker.type]}` : blockerTitle[blocker.type],
+      detail: blocker.detail
+    });
+  });
 
   const challenges = new Map<string, ChecklistItem[]>();
   const responses = new Map<string, ChecklistItem[]>();
@@ -20,25 +44,6 @@ export function validateProject(project: ChecklistProject): ValidationIssue[] {
     if (!item.response.trim()) {
       add({ id: `${item.id}-missing-response`, type: 'missing-response', level: 'error', stageId: item.stageId, itemId: item.id, title: '缺少预期回应', detail: `${item.challenge || '未命名检查项'} 没有填写机组应确认的回应。` });
     }
-    item.preconditionIds.forEach((preconditionId) => {
-      if (preconditionId === item.id) {
-        add({ id: `${item.id}-self-precondition`, type: 'unreachable-precondition', level: 'error', stageId: item.stageId, itemId: item.id, title: '前置条件形成自引用', detail: '检查项不能依赖自身。' });
-        return;
-      }
-      const precondition = itemById.get(preconditionId);
-      if (!precondition) {
-        add({ id: `${item.id}-${preconditionId}-missing`, type: 'unreachable-precondition', level: 'error', stageId: item.stageId, itemId: item.id, title: '前置条件已不存在', detail: `${item.challenge} 引用了已删除的检查项。` });
-        return;
-      }
-      const currentStage = stageById.get(item.stageId);
-      const preconditionStage = stageById.get(precondition.stageId);
-      if (!currentStage || !preconditionStage) return;
-      const unreachable = preconditionStage.order > currentStage.order
-        || (preconditionStage.order === currentStage.order && precondition.order > item.order);
-      if (unreachable) {
-        add({ id: `${item.id}-${preconditionId}-unreachable`, type: 'unreachable-precondition', level: 'error', stageId: item.stageId, itemId: item.id, title: '前置条件不可达', detail: `${precondition.challenge} 排在当前检查项之后，正常执行时无法先满足。` });
-      }
-    });
   });
 
   for (const [challenge, entries] of challenges) {
@@ -53,7 +58,7 @@ export function validateProject(project: ChecklistProject): ValidationIssue[] {
   }
 
   const canonical = ['飞行前检查', '发动机启动', '滑行', '起飞', '爬升', '进近', '着陆'];
-  const positions = project.stages.map((stage) => ({ stage, canonical: canonical.indexOf(stage.name) })).filter((item) => item.canonical >= 0);
+  const positions = project.stages.map((stage) => ({ stage, canonical: canonical.indexOf(stage.name) })).filter((entry) => entry.canonical >= 0);
   for (let index = 1; index < positions.length; index += 1) {
     if (positions[index - 1].canonical > positions[index].canonical) {
       add({

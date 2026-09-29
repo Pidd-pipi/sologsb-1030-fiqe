@@ -132,3 +132,29 @@ kbd { border: 1px solid var(--gray-a7); border-bottom-width: 2px; border-radius:
   .content-page { max-width: none; padding: 0; }
   .print-sheet { border: 0; box-shadow: none; border-radius: 0; padding: 0; }
 }
+
+/* 执行批次页 */
+.batch-page { display: grid; gap: 4px; }
+.batch-groups { display: grid; gap: 12px; margin-top: 16px; }
+.batch-group-wrap { display: grid; gap: 8px; }
+.batch-stage-band { display: flex; align-items: baseline; gap: 10px; padding: 6px 2px 0; }
+.batch-group { padding: 12px 14px; }
+.batch-group-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.batch-number { font-weight: 800; font-size: 12px; padding: 3px 9px; border-radius: 999px; background: var(--accent-a3); color: var(--accent-11); }
+.batch-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 9px; }
+.batch-item { text-align: left; border: 1px solid var(--gray-a5); border-left-width: 3px; border-radius: 10px; padding: 9px 11px; background: var(--color-panel); color: var(--gray-12); cursor: pointer; display: grid; gap: 3px; }
+.batch-item:hover { background: var(--gray-a2); }
+.batch-item small { display: block; color: var(--gray-10); font-size: 10px; line-height: 1.45; }
+.batch-item .batch-response { color: var(--gray-11); font-weight: 600; }
+.batch-item .batch-result { color: var(--green-11); }
+.batch-item.state-stale { border-left-color: var(--amber-9); background: color-mix(in srgb, var(--amber-3) 45%, var(--color-panel)); }
+.batch-item.state-computing { border-left-color: var(--blue-9); }
+.batch-item.state-blocked { border-left-color: var(--red-9); opacity: .75; }
+.batch-item.state-fresh { border-left-color: var(--green-9); }
+.batch-item.state-queued { border-left-color: var(--gray-8); }
+.blocker-panel { padding: 14px; }
+.blocker-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+.frozen-batch-archive { margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--gray-a5); }
+.frozen-batch-list { display: grid; gap: 8px; margin-top: 10px; }
+.frozen-batch-card { display: grid; gap: 4px; }
+.frozen-batch-card small { color: var(--gray-10); }
